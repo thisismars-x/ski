@@ -18,7 +18,7 @@ ski /home
 __Example,__
 ![ski-usage](./display/ski-usage.jpg)
 
-Notice the bottom bar, which specifies all the `help` options. \
+
 See [more](./display/ski-usage.mp4).
 
 # Installation
