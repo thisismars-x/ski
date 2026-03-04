@@ -443,11 +443,11 @@ fn main() -> Result<()> {
                 let name = p.file_name().unwrap_or_default().to_string_lossy();
                 let mut style = if p.is_dir() { Style::default().fg(Color::Blue) } else { Style::default() };
                 if app.marked_delete.contains(p) {
-                    style = style.bg(Color::Red).add_modifier(Modifier::BOLD);
+                    style = style.bg(Color::Red).fg(Color::Black).add_modifier(Modifier::BOLD);
                 } else if app.copy_buffer.contains(p) {
-                    style = style.bg(Color::Green).add_modifier(Modifier::BOLD);
+                    style = style.fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD);
                 } else if app.move_buffer.contains(p) {
-                    style = style.bg(Color::Magenta).add_modifier(Modifier::BOLD);
+                    style = style.bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD);
                 }
                 ListItem::new(name.to_string()).style(style)
             }).collect();
