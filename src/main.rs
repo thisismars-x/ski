@@ -23,7 +23,7 @@ use ratatui::{
 };
 use regex::Regex;
 
-/// The main app structure containing state, file info, and UI mode flags
+/// Main app structure with UI state
 struct App {
     current_dir: PathBuf,
     all_entries: Vec<PathBuf>,
@@ -32,10 +32,12 @@ struct App {
 
     search_mode: bool,
     create_mode: bool,
+    goto_mode: bool,
     show_hidden: bool,
 
     search_query: String,
     create_query: String,
+    goto_query: String,
 
     marked_delete: HashSet<PathBuf>,
     copy_buffer: Vec<PathBuf>,
@@ -44,7 +46,7 @@ struct App {
 }
 
 impl App {
-    /// Initialize the app with a starting directory (or current dir if none)
+    /// Initialize app with starting directory
     fn new(start_dir: Option<PathBuf>) -> Result<Self> {
         let dir = start_dir.unwrap_or(env::current_dir()?);
 
@@ -55,29 +57,28 @@ impl App {
             state: ListState::default(),
             search_mode: false,
             create_mode: false,
+            goto_mode: false,
             show_hidden: false,
             search_query: String::new(),
             create_query: String::new(),
+            goto_query: String::new(),
             marked_delete: HashSet::new(),
             copy_buffer: Vec::new(),
             move_buffer: Vec::new(),
             preview_content: String::new(),
         };
 
-        app.refresh()?; // initial entries
+        app.refresh()?; // initial file list
         Ok(app)
     }
 
-    /// Refresh the file list from the current directory
+    /// Refresh directory entries
     fn refresh(&mut self) -> Result<()> {
         let mut entries: Vec<PathBuf> = match fs::read_dir(&self.current_dir) {
-            Ok(read_dir) => read_dir
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .collect(),
+            Ok(read_dir) => read_dir.filter_map(|e| e.ok().map(|e| e.path())).collect(),
             Err(_) => Vec::new(),
         };
 
-        // Filter out hidden files if `show_hidden` is false
         entries.retain(|p| {
             self.show_hidden
                 || !p.file_name()
@@ -86,7 +87,6 @@ impl App {
                     .starts_with('.')
         });
 
-        // Sort directories first, then files
         entries.sort_by_key(|p| (!p.is_dir(), p.clone()));
 
         self.all_entries = entries.clone();
@@ -100,11 +100,11 @@ impl App {
             self.state.select(Some(clamped));
         }
 
-        self.update_preview(); // update file preview
+        self.update_preview();
         Ok(())
     }
 
-    /// Get the currently selected path
+    /// Get currently selected path
     fn selected_path(&self) -> Option<PathBuf> {
         let index = self.state.selected()?;
         if index < self.entries.len() {
@@ -114,13 +114,11 @@ impl App {
         }
     }
 
-    /// Update the preview panel based on the selected file/directory
+    /// Update preview panel
     fn update_preview(&mut self) {
         self.preview_content.clear();
 
-        let Some(path) = self.selected_path() else {
-            return;
-        };
+        let Some(path) = self.selected_path() else { return; };
 
         let metadata = match fs::metadata(&path) {
             Ok(m) => m,
@@ -130,12 +128,11 @@ impl App {
             }
         };
 
-        // Get last modified time in readable format
         let modified = metadata.modified()
             .ok()
             .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
             .map(|d| {
-                let datetime = chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).unwrap();
+                let datetime = chrono::NaiveDateTime::from_timestamp(d.as_secs() as i64, 0);
                 datetime.format("%Y-%m-%d %H:%M:%S").to_string()
             })
             .unwrap_or_else(|| "Unknown".to_string());
@@ -145,7 +142,6 @@ impl App {
         let mut preview = String::new();
 
         if path.is_dir() {
-            // Directory preview
             let count = fs::read_dir(&path).map(|r| r.count()).unwrap_or(0);
             preview.push_str(&format!(
                 "File Type: Directory\nSize: {} entries\nPermissions: {}\nLast Modified: {}\n{}\n",
@@ -155,7 +151,6 @@ impl App {
                 "-".repeat(50)
             ));
         } else {
-            // File preview
             let size = metadata.len();
             let file_type = match fs::read_to_string(&path) {
                 Ok(_) => "File",
@@ -171,7 +166,6 @@ impl App {
                 "-".repeat(50)
             ));
 
-            // If readable text file, show first 50 lines
             if file_type == "File" {
                 if let Ok(content) = fs::read_to_string(&path) {
                     let lines = content.lines().take(50).collect::<Vec<_>>().join("\n");
@@ -207,7 +201,6 @@ impl App {
         if p.readonly() { "Read-Only".to_string() } else { "Read/Write".to_string() }
     }
 
-    /// Move selection to next entry
     fn next(&mut self) {
         if self.entries.is_empty() { return; }
         let i = self.state.selected().unwrap_or(0);
@@ -216,7 +209,6 @@ impl App {
         self.update_preview();
     }
 
-    /// Move selection to previous entry
     fn previous(&mut self) {
         if self.entries.is_empty() { return; }
         let i = self.state.selected().unwrap_or(0);
@@ -225,7 +217,6 @@ impl App {
         self.update_preview();
     }
 
-    /// Go to parent directory
     fn go_parent(&mut self) -> Result<()> {
         if let Some(parent) = self.current_dir.parent() {
             self.current_dir = parent.to_path_buf();
@@ -234,7 +225,6 @@ impl App {
         Ok(())
     }
 
-    /// Enter a directory if it's valid
     fn enter_dir(&mut self, path: PathBuf) -> Result<()> {
         if path.is_dir() {
             match fs::read_dir(&path) {
@@ -250,7 +240,6 @@ impl App {
         Ok(())
     }
 
-    /// Filter entries based on search query
     fn filter(&mut self) {
         if self.search_query.is_empty() {
             self.entries = self.all_entries.clone();
@@ -261,7 +250,6 @@ impl App {
                 .collect();
         }
 
-        // Reset selection
         if self.entries.is_empty() {
             self.state.select(None);
         } else {
@@ -271,7 +259,6 @@ impl App {
         self.update_preview();
     }
 
-    /// Toggle deletion mark (or delete if already marked)
     fn toggle_delete(&mut self, path: &PathBuf) {
         if self.marked_delete.contains(path) {
             let res = if path.is_dir() {
@@ -291,12 +278,10 @@ impl App {
         }
     }
 
-    /// Unmark a file/directory for deletion
     fn unmark_delete(&mut self, path: &PathBuf) {
         self.marked_delete.remove(path);
     }
 
-    /// Create a file or directory
     fn create_entry(&mut self) -> Result<()> {
         if self.create_query.is_empty() { return Ok(()); }
 
@@ -304,11 +289,9 @@ impl App {
         let name = self.create_query.trim();
 
         if name.ends_with('/') {
-            // Create directory
             path.push(name.trim_end_matches('/'));
             let _ = fs::create_dir_all(&path);
         } else {
-            // Create file
             path.push(name);
             let _ = fs::File::create(&path);
         }
@@ -319,7 +302,6 @@ impl App {
         Ok(())
     }
 
-    /// Add/remove file from copy buffer
     fn mark_copy(&mut self) {
         if let Some(path) = self.selected_path() {
             if self.copy_buffer.contains(&path) {
@@ -330,7 +312,6 @@ impl App {
         }
     }
 
-    /// Add/remove file from move buffer
     fn mark_move(&mut self) {
         if let Some(path) = self.selected_path() {
             if self.move_buffer.contains(&path) {
@@ -341,7 +322,6 @@ impl App {
         }
     }
 
-    /// Paste copy/move buffers into current directory
     fn paste(&mut self) -> Result<()> {
         for src in &self.copy_buffer {
             let dest = self.current_dir.join(src.file_name().unwrap());
@@ -359,12 +339,11 @@ impl App {
         Ok(())
     }
 
-    /// Recursively copy path
     fn copy_path(&self, src: &PathBuf, dest: &PathBuf) -> Result<()> {
         if src.is_file() {
             fs::copy(src, dest)?;
         } else if src.is_dir() {
-            fs::create_dir_all(dest)?; 
+            fs::create_dir_all(dest)?;
             for entry in fs::read_dir(src)? {
                 let entry = entry?;
                 let src_path = entry.path();
@@ -375,12 +354,10 @@ impl App {
         Ok(())
     }
 
-    /// Recursively move path
     fn move_path(&self, src: &PathBuf, dest: &PathBuf) -> Result<()> {
         match fs::rename(src, dest) {
             Ok(_) => Ok(()),
             Err(_) => {
-                // fallback: copy then remove
                 self.copy_path(src, dest)?;
                 if src.is_dir() {
                     fs::remove_dir_all(src)?;
@@ -393,7 +370,7 @@ impl App {
     }
 }
 
-/// Suspend terminal to allow external program execution
+/// Suspend terminal for external program
 fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -408,14 +385,13 @@ fn resume_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     Ok(Terminal::new(CrosstermBackend::new(io::stdout()))?)
 }
 
-/// Open selected file in external editor
+/// Open file in editor
 fn open_in_editor(path: &PathBuf) -> Result<()> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
     let _ = Command::new(editor).arg(path).status();
     Ok(())
 }
 
-/// Main app loop
 fn main() -> Result<()> {
     let start_dir = env::args().nth(1).map(PathBuf::from);
 
@@ -438,7 +414,6 @@ fn main() -> Result<()> {
                 .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .split(vertical[0]);
 
-            // List of files/directories
             let items: Vec<ListItem> = app.entries.iter().map(|p| {
                 let name = p.file_name().unwrap_or_default().to_string_lossy();
                 let mut style = if p.is_dir() { Style::default().fg(Color::Blue) } else { Style::default() };
@@ -459,18 +434,18 @@ fn main() -> Result<()> {
 
             f.render_stateful_widget(list, horizontal[0], &mut list_state);
 
-            // Preview panel
             let preview = Paragraph::new(app.preview_content.clone())
                 .block(Block::default().borders(Borders::ALL).title("Preview"))
                 .wrap(Wrap { trim: false });
 
             f.render_widget(preview, horizontal[1]);
 
-            // Input bar for search/create modes
             let input_bar = if app.search_mode {
                 Paragraph::new(format!("/{}", app.search_query))
             } else if app.create_mode {
                 Paragraph::new(format!("n {}", app.create_query))
+            } else if app.goto_mode {
+                Paragraph::new(format!("g {}", app.goto_query))
             } else {
                 Paragraph::new("")
             };
@@ -478,64 +453,64 @@ fn main() -> Result<()> {
             f.render_widget(input_bar, vertical[1]);
         })?;
 
-        // Handle input events
+        // Handle input
         if let Event::Key(KeyEvent { code, .. }) = event::read()? {
             match code {
                 KeyCode::Esc => {
                     app.search_mode = false;
                     app.create_mode = false;
+                    app.goto_mode = false;
                     app.search_query.clear();
                     app.create_query.clear();
+                    app.goto_query.clear();
                     app.entries = app.all_entries.clone();
                     app.update_preview();
                 }
 
-                KeyCode::Char(c) if app.search_mode => {
-                    app.search_query.push(c);
-                    app.filter();
-                }
+                // Search mode
+                KeyCode::Char(c) if app.search_mode => { app.search_query.push(c); app.filter(); }
+                KeyCode::Backspace if app.search_mode => { app.search_query.pop(); app.filter(); }
 
-                KeyCode::Backspace if app.search_mode => {
-                    app.search_query.pop();
-                    app.filter();
-                }
+                // Create mode
+                KeyCode::Char(c) if app.create_mode => { app.create_query.push(c); }
+                KeyCode::Backspace if app.create_mode => { app.create_query.pop(); }
+                KeyCode::Enter if app.create_mode => { let _ = app.create_entry(); }
 
-                KeyCode::Char(c) if app.create_mode => {
-                    app.create_query.push(c);
-                }
+                // Goto mode
+                KeyCode::Char(c) if app.goto_mode => { app.goto_query.push(c); }
+                KeyCode::Backspace if app.goto_mode => { app.goto_query.pop(); }
+                KeyCode::Enter if app.goto_mode => {
+                    let path_input = app.goto_query.trim();
+                    let target_path = if path_input.starts_with("~") {
+                        if let Ok(home) = std::env::var("HOME") {
+                            PathBuf::from(home).join(&path_input[2..]) // skip "~/"
+                        } else {
+                            app.current_dir.clone() // fallback
+                        }
+                    } else {
+                        let p = PathBuf::from(path_input);
+                        if p.is_absolute() { p } else { app.current_dir.join(p) }
+                    };
 
-                KeyCode::Backspace if app.create_mode => {
-                    app.create_query.pop();
-                }
-
-                KeyCode::Enter if app.create_mode => {
-                    let _ = app.create_entry();
-                }
-
-                KeyCode::Char('q') => break, // Quit
-                KeyCode::Char('/') => {
-                    app.search_mode = true;
-                    app.search_query.clear();
-                }
-                KeyCode::Char('n') => {
-                    app.create_mode = true;
-                    app.create_query.clear();
-                }
-                KeyCode::Char('.') => {
-                    app.show_hidden = !app.show_hidden;
-                    let _ = app.refresh();
-                }
-
-                KeyCode::Char('d') => {
-                    if let Some(path) = app.selected_path() {
-                        app.toggle_delete(&path);
+                    if target_path.is_dir() {
+                        app.current_dir = target_path;
+                        let _ = app.refresh();
+                    } else {
+                        app.preview_content = format!("Directory not found: {}", path_input);
                     }
+
+                    app.goto_mode = false;
+                    app.goto_query.clear();
                 }
-                KeyCode::Char('r') => {
-                    if let Some(path) = app.selected_path() {
-                        app.unmark_delete(&path);
-                    }
-                }
+
+                KeyCode::Char('q') => break,
+                KeyCode::Char('/') => { app.search_mode = true; app.search_query.clear(); }
+                KeyCode::Char('n') => { app.create_mode = true; app.create_query.clear(); }
+                KeyCode::Char('g') if !app.search_mode && !app.create_mode => { app.goto_mode = true; app.goto_query.clear(); }
+                KeyCode::Char('.') => { app.show_hidden = !app.show_hidden; let _ = app.refresh(); }
+
+                KeyCode::Char('d') => { if let Some(path) = app.selected_path() { app.toggle_delete(&path); } }
+                KeyCode::Char('r') => { if let Some(path) = app.selected_path() { app.unmark_delete(&path); } }
 
                 KeyCode::Char('c') => { app.mark_copy(); }
                 KeyCode::Char('m') => { app.mark_move(); }
@@ -563,7 +538,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // Clean up terminal on exit
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
