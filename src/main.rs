@@ -6,6 +6,8 @@ use std::{
     path::PathBuf,
     process::Command,
 };
+
+use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
     execute,
@@ -18,7 +20,6 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
-use anyhow::Result;
 use regex::Regex;
 
 struct App {
@@ -27,24 +28,30 @@ struct App {
     entries: Vec<PathBuf>,
     state: ListState,
     search_mode: bool,
-    show_hidden: bool, 
+    create_mode: bool,
+    show_hidden: bool,
     search_query: String,
-    marked_delete: HashSet<PathBuf>, 
+    create_query: String,
+    marked_delete: HashSet<PathBuf>,
 }
 
 impl App {
     fn new(start_dir: Option<PathBuf>) -> Result<Self> {
-        let dir = if let Some(p) = start_dir { p } else { env::current_dir()? };
+        let dir = start_dir.unwrap_or(env::current_dir()?);
+
         let mut app = Self {
             current_dir: dir,
             all_entries: Vec::new(),
             entries: Vec::new(),
             state: ListState::default(),
             search_mode: false,
+            create_mode: false,
             show_hidden: false,
             search_query: String::new(),
+            create_query: String::new(),
             marked_delete: HashSet::new(),
         };
+
         app.refresh()?;
         Ok(app)
     }
@@ -54,7 +61,10 @@ impl App {
 
         let mut entries: Vec<PathBuf> = fs::read_dir(&self.current_dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| self.show_hidden || !p.file_name().unwrap().to_string_lossy().starts_with('.'))
+            .filter(|p| {
+                self.show_hidden
+                    || !p.file_name().unwrap().to_string_lossy().starts_with('.')
+            })
             .collect();
 
         entries.sort_by_key(|p| (!p.is_dir(), p.clone()));
@@ -62,11 +72,8 @@ impl App {
         self.all_entries = entries.clone();
         self.entries = entries;
 
-        if let Some(sel_path) = selected_path {
-            if let Some(pos) = self.entries.iter().position(|p| *p == sel_path) {
-                self.state.select(Some(pos));
-            } else if !self.entries.is_empty() {
-                let pos = std::cmp::min(self.state.selected().unwrap_or(0), self.entries.len() - 1);
+        if let Some(sel) = selected_path {
+            if let Some(pos) = self.entries.iter().position(|p| *p == sel) {
                 self.state.select(Some(pos));
             }
         } else if !self.entries.is_empty() {
@@ -93,12 +100,30 @@ impl App {
         }
     }
 
-    fn is_match(&self, path: &PathBuf) -> bool {
-        if self.search_query.is_empty() { return false; }
-        if let Ok(regex) = Regex::new(&self.search_query) {
-            return regex.is_match(&path.file_name().unwrap().to_string_lossy());
+    fn create_entry(&mut self) -> Result<()> {
+        if self.create_query.is_empty() {
+            return Ok(());
         }
-        false
+
+        let mut path = self.current_dir.clone();
+        let name = self.create_query.trim();
+
+        if name.ends_with('/') {
+            path.push(name.trim_end_matches('/'));
+            fs::create_dir_all(path)?;
+        } else {
+            path.push(name);
+            fs::File::create(path)?;
+        }
+
+        self.create_query.clear();
+        self.create_mode = false;
+        self.refresh()?;
+        Ok(())
+    }
+
+    fn selected_path(&self) -> Option<PathBuf> {
+        self.state.selected().map(|i| self.entries[i].clone())
     }
 
     fn next(&mut self) {
@@ -131,13 +156,13 @@ impl App {
         Ok(())
     }
 
-    fn selected_path(&self) -> Option<PathBuf> {
-        self.state.selected().map(|i| self.entries[i].clone())
-    }
-
     fn toggle_delete(&mut self, path: &PathBuf) -> Result<()> {
         if self.marked_delete.contains(path) {
-            if path.is_dir() { fs::remove_dir_all(path)?; } else { fs::remove_file(path)?; }
+            if path.is_dir() {
+                fs::remove_dir_all(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
             self.marked_delete.remove(path);
             self.refresh()?;
         } else {
@@ -145,9 +170,19 @@ impl App {
         }
         Ok(())
     }
+
+    fn is_match(&self, path: &PathBuf) -> bool {
+        if self.search_query.is_empty() { return false; }
+        if let Ok(regex) = Regex::new(&self.search_query) {
+            return regex.is_match(&path.file_name().unwrap().to_string_lossy());
+        }
+        false
+    }
 }
 
-fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
+fn suspend_terminal(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -167,7 +202,6 @@ fn open_in_editor(path: &PathBuf) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    // optionally read first argument as starting directory
     let start_dir = env::args().nth(1).map(PathBuf::from);
 
     enable_raw_mode()?;
@@ -175,7 +209,6 @@ fn main() -> Result<()> {
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
-
     let mut app = App::new(start_dir)?;
 
     loop {
@@ -211,16 +244,18 @@ fn main() -> Result<()> {
 
             f.render_stateful_widget(list, chunks[0], &mut app.state);
 
-            let search_bar = if app.search_mode {
+            let input_bar = if app.search_mode {
                 Paragraph::new(format!("/{}", app.search_query))
+            } else if app.create_mode {
+                Paragraph::new(format!("n {}", app.create_query))
             } else {
                 Paragraph::new("")
             };
 
-            f.render_widget(search_bar, chunks[1]);
+            f.render_widget(input_bar, chunks[1]);
 
             let footer = Block::default()
-                .title("⬆⬇ Move  ➡ Enter  ⬅ Parent  / Search  . Toggle hidden  d Delete  ⏎ Open  ESC Cancel  q Quit")
+                .title("⬆⬇ Move  ➡ Enter  ⬅ Parent  / Search  n New  . Toggle hidden  d Delete  ⏎ Open  ESC Cancel  q Quit")
                 .borders(Borders::ALL);
 
             f.render_widget(footer, chunks[2]);
@@ -229,46 +264,62 @@ fn main() -> Result<()> {
         if let Event::Key(KeyEvent { code, .. }) = event::read()? {
             match code {
 
+                // ===== INPUT MODES FIRST =====
+
+                KeyCode::Esc => {
+                    app.search_mode = false;
+                    app.create_mode = false;
+                    app.search_query.clear();
+                    app.create_query.clear();
+                    app.entries = app.all_entries.clone();
+                }
+
+                KeyCode::Char(c) if app.search_mode => {
+                    app.search_query.push(c);
+                    app.filter();
+                }
+
+                KeyCode::Backspace if app.search_mode => {
+                    app.search_query.pop();
+                    app.filter();
+                }
+
+                KeyCode::Char(c) if app.create_mode => {
+                    app.create_query.push(c);
+                }
+
+                KeyCode::Backspace if app.create_mode => {
+                    app.create_query.pop();
+                }
+
+                KeyCode::Enter if app.create_mode => {
+                    app.create_entry()?;
+                }
+
+                // ===== NORMAL MODE =====
+
                 KeyCode::Char('q') => break,
 
-                // search for file and dir matching this pattern
                 KeyCode::Char('/') => {
                     app.search_mode = true;
                     app.search_query.clear();
-                },
+                }
 
-                // toggle hidden files visibility
-                KeyCode::Char('.') => { 
+                KeyCode::Char('n') => {
+                    app.create_mode = true;
+                    app.create_query.clear();
+                }
+
+                KeyCode::Char('.') => {
                     app.show_hidden = !app.show_hidden;
                     app.refresh()?;
-                },
+                }
 
-                // mark a file for deletion
-                KeyCode::Char('d') => { 
-                    if let Some(path) = app.selected_path() { 
-                        app.toggle_delete(&path)?; 
-                    } 
-                },
-
-                // exit search_mode and reset all deleted files
-                // if you enter search_mode, and don't exit
-                // the same pattern will be matched for every directory
-                KeyCode::Esc => { 
-                    app.search_mode = false;
-                    app.search_query.clear();
-                    app.entries = app.all_entries.clone();
-                    app.marked_delete.clear();
-                },
-
-                KeyCode::Char(c) if app.search_mode => { 
-                    app.search_query.push(c);
-                    app.filter();
-                },
-
-                KeyCode::Backspace if app.search_mode => { 
-                    app.search_query.pop();
-                    app.filter();
-                },
+                KeyCode::Char('d') => {
+                    if let Some(path) = app.selected_path() {
+                        app.toggle_delete(&path)?;
+                    }
+                }
 
                 KeyCode::Down => app.next(),
                 KeyCode::Up => app.previous(),
@@ -278,10 +329,8 @@ fn main() -> Result<()> {
                     if let Some(path) = app.selected_path() {
                         app.enter_dir(path)?;
                     }
-                },
+                }
 
-
-                // open with $EDITOR
                 KeyCode::Enter => {
                     if let Some(path) = app.selected_path() {
                         if path.is_file() {
@@ -292,7 +341,7 @@ fn main() -> Result<()> {
                             app.enter_dir(path)?;
                         }
                     }
-                },
+                }
 
                 _ => {}
             }
