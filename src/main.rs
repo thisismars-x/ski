@@ -17,7 +17,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Terminal,
 };
 use regex::Regex;
@@ -27,12 +27,16 @@ struct App {
     all_entries: Vec<PathBuf>,
     entries: Vec<PathBuf>,
     state: ListState,
+
     search_mode: bool,
     create_mode: bool,
     show_hidden: bool,
+
     search_query: String,
     create_query: String,
+
     marked_delete: HashSet<PathBuf>,
+    preview_content: String,
 }
 
 impl App {
@@ -50,6 +54,7 @@ impl App {
             search_query: String::new(),
             create_query: String::new(),
             marked_delete: HashSet::new(),
+            preview_content: String::new(),
         };
 
         app.refresh()?;
@@ -57,13 +62,14 @@ impl App {
     }
 
     fn refresh(&mut self) -> Result<()> {
-        let selected_path = self.selected_path();
-
         let mut entries: Vec<PathBuf> = fs::read_dir(&self.current_dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
                 self.show_hidden
-                    || !p.file_name().unwrap().to_string_lossy().starts_with('.')
+                    || !p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with('.')
             })
             .collect();
 
@@ -72,14 +78,85 @@ impl App {
         self.all_entries = entries.clone();
         self.entries = entries;
 
-        if let Some(sel) = selected_path {
-            if let Some(pos) = self.entries.iter().position(|p| *p == sel) {
-                self.state.select(Some(pos));
-            }
-        } else if !self.entries.is_empty() {
-            self.state.select(Some(0));
+        if self.entries.is_empty() {
+            self.state.select(None);
+        } else {
+            let selected = self.state.selected().unwrap_or(0);
+            let clamped = selected.min(self.entries.len() - 1);
+            self.state.select(Some(clamped));
         }
 
+        self.update_preview();
+        Ok(())
+    }
+
+    fn selected_path(&self) -> Option<PathBuf> {
+        let index = self.state.selected()?;
+        if index < self.entries.len() {
+            Some(self.entries[index].clone())
+        } else {
+            None
+        }
+    }
+
+    fn update_preview(&mut self) {
+        self.preview_content.clear();
+
+        let Some(path) = self.selected_path() else { return };
+
+        if path.is_dir() {
+            if let Ok(read) = fs::read_dir(&path) {
+                let count = read.count();
+                self.preview_content =
+                    format!("Directory\n\n{} entries", count);
+            }
+            return;
+        }
+
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                self.preview_content = content
+                    .lines()
+                    .take(100)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            Err(_) => {
+                self.preview_content =
+                    "Binary or unreadable file".to_string();
+            }
+        }
+    }
+
+    fn next(&mut self) {
+        if self.entries.is_empty() { return; }
+        let i = self.state.selected().unwrap_or(0);
+        let next = if i >= self.entries.len() - 1 { 0 } else { i + 1 };
+        self.state.select(Some(next));
+        self.update_preview();
+    }
+
+    fn previous(&mut self) {
+        if self.entries.is_empty() { return; }
+        let i = self.state.selected().unwrap_or(0);
+        let prev = if i == 0 { self.entries.len() - 1 } else { i - 1 };
+        self.state.select(Some(prev));
+        self.update_preview();
+    }
+
+    fn go_parent(&mut self) -> Result<()> {
+        if let Some(parent) = self.current_dir.parent() {
+            self.current_dir = parent.to_path_buf();
+            self.refresh()?;
+        }
+        Ok(())
+    }
+
+    fn enter_dir(&mut self, path: PathBuf) -> Result<()> {
+        if path.is_dir() {
+            self.current_dir = path;
+            self.refresh()?;
+        }
         Ok(())
     }
 
@@ -95,9 +172,28 @@ impl App {
                 .collect();
         }
 
-        if !self.entries.is_empty() {
+        if self.entries.is_empty() {
+            self.state.select(None);
+        } else {
             self.state.select(Some(0));
         }
+
+        self.update_preview();
+    }
+
+    fn toggle_delete(&mut self, path: &PathBuf) -> Result<()> {
+        if self.marked_delete.contains(path) {
+            if path.is_dir() {
+                fs::remove_dir_all(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
+            self.marked_delete.remove(path);
+            self.refresh()?;
+        } else {
+            self.marked_delete.insert(path.clone());
+        }
+        Ok(())
     }
 
     fn create_entry(&mut self) -> Result<()> {
@@ -121,63 +217,6 @@ impl App {
         self.refresh()?;
         Ok(())
     }
-
-    fn selected_path(&self) -> Option<PathBuf> {
-        self.state.selected().map(|i| self.entries[i].clone())
-    }
-
-    fn next(&mut self) {
-        if self.entries.is_empty() { return; }
-        let i = self.state.selected().unwrap_or(0);
-        let next = if i >= self.entries.len() - 1 { 0 } else { i + 1 };
-        self.state.select(Some(next));
-    }
-
-    fn previous(&mut self) {
-        if self.entries.is_empty() { return; }
-        let i = self.state.selected().unwrap_or(0);
-        let prev = if i == 0 { self.entries.len() - 1 } else { i - 1 };
-        self.state.select(Some(prev));
-    }
-
-    fn go_parent(&mut self) -> Result<()> {
-        if let Some(parent) = self.current_dir.parent() {
-            self.current_dir = parent.to_path_buf();
-            self.refresh()?;
-        }
-        Ok(())
-    }
-
-    fn enter_dir(&mut self, path: PathBuf) -> Result<()> {
-        if path.is_dir() {
-            self.current_dir = path;
-            self.refresh()?;
-        }
-        Ok(())
-    }
-
-    fn toggle_delete(&mut self, path: &PathBuf) -> Result<()> {
-        if self.marked_delete.contains(path) {
-            if path.is_dir() {
-                fs::remove_dir_all(path)?;
-            } else {
-                fs::remove_file(path)?;
-            }
-            self.marked_delete.remove(path);
-            self.refresh()?;
-        } else {
-            self.marked_delete.insert(path.clone());
-        }
-        Ok(())
-    }
-
-    fn is_match(&self, path: &PathBuf) -> bool {
-        if self.search_query.is_empty() { return false; }
-        if let Ok(regex) = Regex::new(&self.search_query) {
-            return regex.is_match(&path.file_name().unwrap().to_string_lossy());
-        }
-        false
-    }
 }
 
 fn suspend_terminal(
@@ -196,7 +235,8 @@ fn resume_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
 }
 
 fn open_in_editor(path: &PathBuf) -> Result<()> {
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+    let editor = std::env::var("EDITOR")
+        .unwrap_or_else(|_| "vim".to_string());
     Command::new(editor).arg(path).status()?;
     Ok(())
 }
@@ -213,10 +253,28 @@ fn main() -> Result<()> {
 
     loop {
         terminal.draw(|f| {
-            let chunks = Layout::default()
+            let vertical = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .split(f.area());
+
+            let horizontal = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(60),
+                ])
+                .split(vertical[0]);
+
+            // let items: Vec<ListItem> = app.entries.iter().map(|p| {
+            //     let name = p.file_name().unwrap().to_string_lossy();
+            //     let style = if p.is_dir() {
+            //         Style::default().fg(Color::Blue)
+            //     } else {
+            //         Style::default()
+            //     };
+            //     ListItem::new(name.to_string()).style(style)
+            // }).collect();
 
             let items: Vec<ListItem> = app.entries.iter().map(|p| {
                 let name = p.file_name().unwrap().to_string_lossy();
@@ -227,12 +285,11 @@ fn main() -> Result<()> {
                     Style::default()
                 };
 
-                if app.is_match(p) {
-                    style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
-                }
-
+                // 🔥 If marked for deletion -> make red + bold
                 if app.marked_delete.contains(p) {
-                    style = style.bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD);
+                    style = Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD);
                 }
 
                 ListItem::new(name.to_string()).style(style)
@@ -242,7 +299,13 @@ fn main() -> Result<()> {
                 .block(Block::default().borders(Borders::ALL).title(app.current_dir.to_string_lossy()))
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-            f.render_stateful_widget(list, chunks[0], &mut app.state);
+            f.render_stateful_widget(list, horizontal[0], &mut app.state);
+
+            let preview = Paragraph::new(app.preview_content.clone())
+                .block(Block::default().borders(Borders::ALL).title("Preview"))
+                .wrap(Wrap { trim: false });
+
+            f.render_widget(preview, horizontal[1]);
 
             let input_bar = if app.search_mode {
                 Paragraph::new(format!("/{}", app.search_query))
@@ -252,19 +315,11 @@ fn main() -> Result<()> {
                 Paragraph::new("")
             };
 
-            f.render_widget(input_bar, chunks[1]);
-
-            let footer = Block::default()
-                .title("⬆⬇ Move  ➡ Enter  ⬅ Parent  / Search  n New  . Toggle hidden  d Delete  ⏎ Open  ESC Cancel  q Quit")
-                .borders(Borders::ALL);
-
-            f.render_widget(footer, chunks[2]);
+            f.render_widget(input_bar, vertical[1]);
         })?;
 
         if let Event::Key(KeyEvent { code, .. }) = event::read()? {
             match code {
-
-                // ===== INPUT MODES FIRST =====
 
                 KeyCode::Esc => {
                     app.search_mode = false;
@@ -272,6 +327,7 @@ fn main() -> Result<()> {
                     app.search_query.clear();
                     app.create_query.clear();
                     app.entries = app.all_entries.clone();
+                    app.update_preview();
                 }
 
                 KeyCode::Char(c) if app.search_mode => {
@@ -296,20 +352,9 @@ fn main() -> Result<()> {
                     app.create_entry()?;
                 }
 
-                // ===== NORMAL MODE =====
-
                 KeyCode::Char('q') => break,
-
-                KeyCode::Char('/') => {
-                    app.search_mode = true;
-                    app.search_query.clear();
-                }
-
-                KeyCode::Char('n') => {
-                    app.create_mode = true;
-                    app.create_query.clear();
-                }
-
+                KeyCode::Char('/') => { app.search_mode = true; app.search_query.clear(); }
+                KeyCode::Char('n') => { app.create_mode = true; app.create_query.clear(); }
                 KeyCode::Char('.') => {
                     app.show_hidden = !app.show_hidden;
                     app.refresh()?;
@@ -321,10 +366,18 @@ fn main() -> Result<()> {
                     }
                 }
 
+                KeyCode::Char('r') => {
+                    if let Some(path) = app.selected_path() {
+                        if app.marked_delete.contains(&path) {
+                            // unmark for deletion
+                            app.marked_delete.remove(&path);
+                        }
+                    }
+                }
+
                 KeyCode::Down => app.next(),
                 KeyCode::Up => app.previous(),
                 KeyCode::Left => app.go_parent()?,
-
                 KeyCode::Right => {
                     if let Some(path) = app.selected_path() {
                         app.enter_dir(path)?;
@@ -351,6 +404,5 @@ fn main() -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    println!("{}", app.current_dir.display());
     Ok(())
 }
