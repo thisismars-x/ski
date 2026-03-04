@@ -2,7 +2,7 @@
 
 
 `ski` is a terminal utility to automate the mundane task of navigation between directories. \
-Stop spamming multiple pwd/cd/ls commands, use `ski` instead.
+Stop spamming multiple pwd/cd/ls/cat/rm/mv/cp/stat commands, use `ski` instead.
 
 
 # Usage
