@@ -362,14 +362,11 @@ impl App {
     /// Recursively copy path
     fn copy_path(&self, src: &PathBuf, dest: &PathBuf) -> Result<()> {
         if src.is_file() {
-            let _ = fs::copy(src, dest);
+            fs::copy(src, dest)?;
         } else if src.is_dir() {
-            let _ = fs::create_dir_all(dest);
+            fs::create_dir_all(dest)?; 
             for entry in fs::read_dir(src)? {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
+                let entry = entry?;
                 let src_path = entry.path();
                 let dest_path = dest.join(entry.file_name());
                 self.copy_path(&src_path, &dest_path)?;
@@ -383,11 +380,12 @@ impl App {
         match fs::rename(src, dest) {
             Ok(_) => Ok(()),
             Err(_) => {
+                // fallback: copy then remove
                 self.copy_path(src, dest)?;
                 if src.is_dir() {
-                    let _ = fs::remove_dir_all(src);
+                    fs::remove_dir_all(src)?;
                 } else {
-                    let _ = fs::remove_file(src);
+                    fs::remove_file(src)?;
                 }
                 Ok(())
             }
