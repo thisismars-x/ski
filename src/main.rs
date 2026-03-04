@@ -340,6 +340,12 @@ impl App {
     }
 
     fn copy_path(&self, src: &PathBuf, dest: &PathBuf) -> Result<()> {
+        // earlier bug: copy and paste to same dir truncated the file to 0 bytes
+        // Skip if src and dest are the same file
+        if fs::canonicalize(src)? == fs::canonicalize(dest).unwrap_or(dest.clone()) {
+            return Ok(()); // do nothing
+        }
+
         if src.is_file() {
             fs::copy(src, dest)?;
         } else if src.is_dir() {
