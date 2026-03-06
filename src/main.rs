@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     fs,
     io,
@@ -19,9 +19,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    text::Span,
     Terminal,
 };
 use regex::Regex;
+
+mod git;
+use git::{get_git_status, GitStatus};
 
 /// Main app structure with UI state
 struct App {
@@ -39,10 +43,19 @@ struct App {
     create_query: String,
     goto_query: String,
 
+    rename_mode: bool,
+    rename_query: String,
+
     marked_delete: HashSet<PathBuf>,
     copy_buffer: Vec<PathBuf>,
     move_buffer: Vec<PathBuf>,
     preview_content: String,
+
+    symlink_mode: bool,
+    symlink_query: String,
+
+    show_git: bool,
+    git_status: Option<HashMap<PathBuf, GitStatus>>, // may not be under git tracking
 }
 
 impl App {
@@ -66,6 +79,12 @@ impl App {
             copy_buffer: Vec::new(),
             move_buffer: Vec::new(),
             preview_content: String::new(),
+            rename_mode: false,
+            rename_query: String::new(),
+            symlink_mode: false,
+            symlink_query: String::new(),
+            show_git: true,
+            git_status: None,
         };
 
         app.refresh()?; // initial file list
@@ -101,6 +120,7 @@ impl App {
         }
 
         self.update_preview();
+        self.git_status = get_git_status(&self.current_dir);
         Ok(())
     }
 
@@ -132,7 +152,7 @@ impl App {
             .ok()
             .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
             .map(|d| {
-                let datetime = chrono::NaiveDateTime::from_timestamp(d.as_secs() as i64, 0);
+                let datetime = chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).unwrap(); // remove deprecated function chrono::NativeDateTime
                 datetime.format("%Y-%m-%d %H:%M:%S").to_string()
             })
             .unwrap_or_else(|| "Unknown".to_string());
@@ -154,7 +174,7 @@ impl App {
             let size = metadata.len();
             let file_type = match fs::read_to_string(&path) {
                 Ok(_) => "File",
-                Err(_) => "Binary/Unreadable or Permission Denied",
+                Err(_) => "Binary/Unreadable",
             };
 
             preview.push_str(&format!(
@@ -374,6 +394,32 @@ impl App {
             }
         }
     }
+
+    fn create_symlink_for_selected(&mut self) -> Result<()> {
+        if let Some(src) = self.selected_path() {
+            let name = self.symlink_query.trim();
+            if name.is_empty() {
+                self.symlink_mode = false;
+                return Ok(()); // do nothing if no name
+            }
+
+            let dest = self.current_dir.join(name);
+
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(src, &dest)?;
+            #[cfg(windows)]
+            if src.is_file() {
+                std::os::windows::fs::symlink_file(src, &dest)?;
+            } else {
+                std::os::windows::fs::symlink_dir(src, &dest)?;
+            }
+
+            self.symlink_query.clear();
+            self.symlink_mode = false;
+            self.refresh()?; // update list
+        }
+        Ok(())
+    }
 }
 
 /// Suspend terminal for external program
@@ -408,20 +454,33 @@ fn main() -> Result<()> {
     let mut app = App::new(start_dir)?;
 
     loop {
-        // Draw UI
         terminal.draw(|f| {
+            // Split main layout vertically: top = panels, bottom = input bar
             let vertical = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .split(f.area());
 
+            // Split top area horizontally: left = file list, right = preview
             let horizontal = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .split(vertical[0]);
 
+            // Build file list items
             let items: Vec<ListItem> = app.entries.iter().map(|p| {
                 let name = p.file_name().unwrap_or_default().to_string_lossy();
+                let display = if app.show_git {
+                    if let Some(map) = &app.git_status {
+                        let git = map.get(p).map(|s| s.short()).unwrap_or(".");
+                        format!("{:2} {}", git, name)
+                    } else {
+                        name.to_string()
+                    }
+                } else {
+                    name.to_string()
+                };
+
                 let mut style = if p.is_dir() { Style::default().fg(Color::Blue) } else { Style::default() };
                 if app.marked_delete.contains(p) {
                     style = style.bg(Color::Red).fg(Color::Black).add_modifier(Modifier::BOLD);
@@ -429,69 +488,147 @@ fn main() -> Result<()> {
                     style = style.fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD);
                 } else if app.move_buffer.contains(p) {
                     style = style.bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD);
-                }
-                ListItem::new(name.to_string()).style(style)
+                } else if app.symlink_mode {
+                    if let Some(sel) = app.selected_path() {
+                        if sel == *p {
+                            style = style.bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD);
+                        }
+                    }
+                } 
+
+                ListItem::new(display).style(style)
             }).collect();
 
+            // Directory name turns green if under git
+            let dir_title = if app.git_status.is_some() {
+                Span::styled(app.current_dir.to_string_lossy(), Style::default().fg(Color::LightGreen))
+            } else {
+                Span::raw(app.current_dir.to_string_lossy())
+            };
+
+            let left_block = Block::default()
+                .borders(Borders::ALL)
+                .title(dir_title);
+
+            // Render file list
             let mut list_state = app.state.clone();
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(app.current_dir.to_string_lossy()))
+                .block(left_block)
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
             f.render_stateful_widget(list, horizontal[0], &mut list_state);
 
+            // Render preview panel
             let preview = Paragraph::new(app.preview_content.clone())
                 .block(Block::default().borders(Borders::ALL).title("Preview"))
                 .wrap(Wrap { trim: false });
-
             f.render_widget(preview, horizontal[1]);
 
-            let input_bar = if app.search_mode {
-                Paragraph::new(format!("/{}", app.search_query))
+            // Render input bar at bottom
+            let input_text = if app.search_mode {
+                format!("/{}", app.search_query)
             } else if app.create_mode {
-                Paragraph::new(format!("n {}", app.create_query))
+                format!("n {}", app.create_query)
             } else if app.goto_mode {
-                Paragraph::new(format!("g {}", app.goto_query))
+                format!("g {}", app.goto_query)
+            } else if app.rename_mode {
+                format!("Rename: {}", app.rename_query)
+            } else  if app.symlink_mode {
+                format!("Symlink: {}", app.symlink_query)
             } else {
-                Paragraph::new("")
+                "".to_string()
             };
 
+            let input_bar = Paragraph::new(input_text);
             f.render_widget(input_bar, vertical[1]);
         })?;
 
         // Handle input
         if let Event::Key(KeyEvent { code, .. }) = event::read()? {
             match code {
+
+                // ESC cancels all modes
                 KeyCode::Esc => {
                     app.search_mode = false;
                     app.create_mode = false;
                     app.goto_mode = false;
+                    app.rename_mode = false;
+                    app.symlink_mode = false;
                     app.search_query.clear();
                     app.create_query.clear();
                     app.goto_query.clear();
+                    app.rename_query.clear();
+                    app.symlink_query.clear();
                     app.entries = app.all_entries.clone();
                     app.update_preview();
                 }
 
-                // Search mode
-                KeyCode::Char(c) if app.search_mode => { app.search_query.push(c); app.filter(); }
-                KeyCode::Backspace if app.search_mode => { app.search_query.pop(); app.filter(); }
+                // Typing while in symlink mode
+                KeyCode::Char(c) if app.symlink_mode => {
+                    app.symlink_query.push(c);
+                }
+                KeyCode::Backspace if app.symlink_mode => {
+                    app.symlink_query.pop();
+                }
+                KeyCode::Enter if app.symlink_mode => {
+                    let _ = app.create_symlink_for_selected();
+                    app.symlink_mode = false;
+                }
 
-                // Create mode
-                KeyCode::Char(c) if app.create_mode => { app.create_query.push(c); }
-                KeyCode::Backspace if app.create_mode => { app.create_query.pop(); }
-                KeyCode::Enter if app.create_mode => { let _ = app.create_entry(); }
+                // Typing while in rename mode
+                KeyCode::Char(c) if app.rename_mode => {
+                    app.rename_query.push(c);
+                }
+                KeyCode::Backspace if app.rename_mode => {
+                    app.rename_query.pop();
+                }
+                KeyCode::Enter if app.rename_mode => {
+                    if let Some(old_path) = app.selected_path() {
+                        let new_name = app.rename_query.trim();
+                        if !new_name.is_empty() {
+                            let new_path = old_path.parent().unwrap().join(new_name);
+                            let _ = fs::rename(old_path, new_path);
+                            let _ = app.refresh();
+                        }
+                    }
+                    app.rename_mode = false;
+                    app.rename_query.clear();
+                }
 
-                // Goto mode
-                KeyCode::Char(c) if app.goto_mode => { app.goto_query.push(c); }
-                KeyCode::Backspace if app.goto_mode => { app.goto_query.pop(); }
+                // Typing while in search mode
+                KeyCode::Char(c) if app.search_mode => {
+                    app.search_query.push(c);
+                    app.filter();
+                }
+                KeyCode::Backspace if app.search_mode => {
+                    app.search_query.pop();
+                    app.filter();
+                }
+
+                // Typing while in create mode
+                KeyCode::Char(c) if app.create_mode => {
+                    app.create_query.push(c);
+                }
+                KeyCode::Backspace if app.create_mode => {
+                    app.create_query.pop();
+                }
+                KeyCode::Enter if app.create_mode => {
+                    let _ = app.create_entry();
+                }
+
+                // Typing while in goto mode
+                KeyCode::Char(c) if app.goto_mode => {
+                    app.goto_query.push(c);
+                }
+                KeyCode::Backspace if app.goto_mode => {
+                    app.goto_query.pop();
+                }
                 KeyCode::Enter if app.goto_mode => {
                     let path_input = app.goto_query.trim();
                     let target_path = if path_input.starts_with("~") {
                         if let Ok(home) = std::env::var("HOME") {
-                            PathBuf::from(home).join(&path_input[2..]) // skip "~/"
+                            PathBuf::from(home).join(&path_input[1..])
                         } else {
-                            app.current_dir.clone() // fallback
+                            app.current_dir.clone()
                         }
                     } else {
                         let p = PathBuf::from(path_input);
@@ -509,18 +646,37 @@ fn main() -> Result<()> {
                     app.goto_query.clear();
                 }
 
+                // Main keybindings (only active when not in a mode)
+                KeyCode::Char('s') => {
+                    if !app.symlink_mode && !app.rename_mode && !app.search_mode && !app.create_mode && !app.goto_mode {
+                        if app.selected_path().is_some() {
+                            app.symlink_mode = true;
+                            app.symlink_query.clear();
+                        }
+                    }
+                }
+
+                KeyCode::Char(' ') => {
+                    if !app.symlink_mode && !app.rename_mode {
+                        if app.selected_path().is_some() {
+                            app.rename_mode = true;
+                            app.rename_query.clear();
+                        }
+                    }
+                }
+
+                KeyCode::Char('c') => { if !app.symlink_mode && !app.rename_mode { app.mark_copy(); } }
+                KeyCode::Char('m') => { if !app.symlink_mode && !app.rename_mode { app.mark_move(); } }
+                KeyCode::Char('p') => { if !app.symlink_mode && !app.rename_mode { let _ = app.paste(); } }
+                KeyCode::Char('d') => { if !app.symlink_mode && !app.rename_mode { if let Some(path) = app.selected_path() { app.toggle_delete(&path); } } }
+                KeyCode::Char('r') => { if !app.symlink_mode && !app.rename_mode { if let Some(path) = app.selected_path() { app.unmark_delete(&path); } } }
+
                 KeyCode::Char('q') => break,
                 KeyCode::Char('/') => { app.search_mode = true; app.search_query.clear(); }
                 KeyCode::Char('n') => { app.create_mode = true; app.create_query.clear(); }
                 KeyCode::Char('g') if !app.search_mode && !app.create_mode => { app.goto_mode = true; app.goto_query.clear(); }
                 KeyCode::Char('.') => { app.show_hidden = !app.show_hidden; let _ = app.refresh(); }
-
-                KeyCode::Char('d') => { if let Some(path) = app.selected_path() { app.toggle_delete(&path); } }
-                KeyCode::Char('r') => { if let Some(path) = app.selected_path() { app.unmark_delete(&path); } }
-
-                KeyCode::Char('c') => { app.mark_copy(); }
-                KeyCode::Char('m') => { app.mark_move(); }
-                KeyCode::Char('p') => { let _ = app.paste(); }
+                KeyCode::Char('?') => { app.show_git = !app.show_git; }
 
                 KeyCode::Down => app.next(),
                 KeyCode::Up => app.previous(),
@@ -528,19 +684,22 @@ fn main() -> Result<()> {
                 KeyCode::Right => { if let Some(path) = app.selected_path() { let _ = app.enter_dir(path); } }
 
                 KeyCode::Enter => {
-                    if let Some(path) = app.selected_path() {
-                        if path.is_file() {
-                            suspend_terminal(&mut terminal)?;
-                            let _ = open_in_editor(&path);
-                            terminal = resume_terminal()?;
-                        } else {
-                            let _ = app.enter_dir(path);
+                    if !app.rename_mode && !app.symlink_mode {
+                        if let Some(path) = app.selected_path() {
+                            if path.is_file() {
+                                suspend_terminal(&mut terminal)?;
+                                let _ = open_in_editor(&path);
+                                terminal = resume_terminal()?;
+                            } else {
+                                let _ = app.enter_dir(path);
+                            }
                         }
                     }
                 }
 
                 _ => {}
             }
+
         }
     }
 
