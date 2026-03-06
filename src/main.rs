@@ -556,6 +556,9 @@ fn main() -> Result<()> {
                     app.goto_mode = false;
                     app.rename_mode = false;
                     app.symlink_mode = false;
+                    app.marked_delete.clear();
+                    app.copy_buffer.clear();
+                    app.move_buffer.clear();
                     app.search_query.clear();
                     app.create_query.clear();
                     app.goto_query.clear();
