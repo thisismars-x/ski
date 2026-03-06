@@ -305,15 +305,18 @@ impl App {
     fn create_entry(&mut self) -> Result<()> {
         if self.create_query.is_empty() { return Ok(()); }
 
-        let mut path = self.current_dir.clone();
         let name = self.create_query.trim();
+        let path = self.current_dir.join(name);
 
         if name.ends_with('/') {
-            path.push(name.trim_end_matches('/'));
-            let _ = fs::create_dir_all(&path);
+            // Directory mode
+            fs::create_dir_all(&path)?;
         } else {
-            path.push(name);
-            let _ = fs::File::create(&path);
+            // File mode: ensure parent directories exist
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::File::create(&path)?;
         }
 
         self.create_query.clear();
