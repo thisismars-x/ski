@@ -4,6 +4,7 @@ use std::{
     process::Command,
 };
 
+/// Atomic file state under git control
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitStatus {
     Modified,
@@ -44,14 +45,33 @@ impl GitStatus {
     }
 }
 
-// if not under git tracking immediately returns None
-pub fn get_git_status(repo_dir: &Path) -> Option<HashMap<PathBuf, GitStatus>> {
+/// Find the git repository root
+fn git_root(path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .current_dir(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Some(PathBuf::from(root))
+}
+
+/// Return None if not under git tracking
+pub fn get_git_status(current_dir: &Path) -> Option<HashMap<PathBuf, GitStatus>> {
+    let repo_root = git_root(current_dir)?;
+
     let output = Command::new("git")
         .arg("status")
         .arg("--porcelain")
-        .current_dir(repo_dir)
+        .current_dir(&repo_root)
         .output()
-        .ok()?;   
+        .ok()?;
 
     if !output.status.success() {
         return None;
@@ -65,12 +85,24 @@ pub fn get_git_status(repo_dir: &Path) -> Option<HashMap<PathBuf, GitStatus>> {
             continue;
         }
 
+        // First two characters = git status code
         let code = &line[..2];
-        let file = line[3..].trim();
+
+        // Remaining part is the file path
+        let raw = line[3..].trim();
+
+        // Handle rename format: "old -> new"
+        let file = if raw.contains(" -> ") {
+            raw.split(" -> ").last().unwrap()
+        } else {
+            raw
+        };
 
         let status = GitStatus::from_code(code);
 
-        let path = repo_dir.join(file);
+        // Convert to absolute path so it matches your explorer entries
+        let path = repo_root.join(file);
+
         map.insert(path, status);
     }
 

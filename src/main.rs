@@ -1,8 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    env,
-    fs,
-    io,
+    env, fs, io,
     path::PathBuf,
     process::Command,
     time::UNIX_EPOCH,
@@ -12,20 +10,20 @@ use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     text::Span,
-    Terminal,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use regex::Regex;
 
 mod git;
-use git::{get_git_status, GitStatus};
+use git::{GitStatus, get_git_status};
 
 /// Main app structure with UI state
 struct App {
@@ -100,7 +98,8 @@ impl App {
 
         entries.retain(|p| {
             self.show_hidden
-                || !p.file_name()
+                || !p
+                    .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .starts_with('.')
@@ -138,7 +137,9 @@ impl App {
     fn update_preview(&mut self) {
         self.preview_content.clear();
 
-        let Some(path) = self.selected_path() else { return; };
+        let Some(path) = self.selected_path() else {
+            return;
+        };
 
         let metadata = match fs::metadata(&path) {
             Ok(m) => m,
@@ -148,7 +149,8 @@ impl App {
             }
         };
 
-        let modified = metadata.modified()
+        let modified = metadata
+            .modified()
             .ok()
             .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
             .map(|d| {
@@ -218,21 +220,37 @@ impl App {
     #[cfg(windows)]
     fn get_permissions_string(metadata: &fs::Metadata) -> String {
         let p = metadata.permissions();
-        if p.readonly() { "Read-Only".to_string() } else { "Read/Write".to_string() }
+        if p.readonly() {
+            "Read-Only".to_string()
+        } else {
+            "Read/Write".to_string()
+        }
     }
 
     fn next(&mut self) {
-        if self.entries.is_empty() { return; }
+        if self.entries.is_empty() {
+            return;
+        }
         let i = self.state.selected().unwrap_or(0);
-        let next = if i >= self.entries.len() - 1 { 0 } else { i + 1 };
+        let next = if i >= self.entries.len() - 1 {
+            0
+        } else {
+            i + 1
+        };
         self.state.select(Some(next));
         self.update_preview();
     }
 
     fn previous(&mut self) {
-        if self.entries.is_empty() { return; }
+        if self.entries.is_empty() {
+            return;
+        }
         let i = self.state.selected().unwrap_or(0);
-        let prev = if i == 0 { self.entries.len() - 1 } else { i - 1 };
+        let prev = if i == 0 {
+            self.entries.len() - 1
+        } else {
+            i - 1
+        };
         self.state.select(Some(prev));
         self.update_preview();
     }
@@ -264,7 +282,9 @@ impl App {
         if self.search_query.is_empty() {
             self.entries = self.all_entries.clone();
         } else if let Ok(regex) = Regex::new(&self.search_query) {
-            self.entries = self.all_entries.iter()
+            self.entries = self
+                .all_entries
+                .iter()
                 .filter(|p| regex.is_match(&p.file_name().unwrap().to_string_lossy()))
                 .cloned()
                 .collect();
@@ -303,7 +323,9 @@ impl App {
     }
 
     fn create_entry(&mut self) -> Result<()> {
-        if self.create_query.is_empty() { return Ok(()); }
+        if self.create_query.is_empty() {
+            return Ok(());
+        }
 
         let name = self.create_query.trim();
         let path = self.current_dir.join(name);
@@ -471,47 +493,68 @@ fn main() -> Result<()> {
                 .split(vertical[0]);
 
             // Build file list items
-            let items: Vec<ListItem> = app.entries.iter().map(|p| {
-                let name = p.file_name().unwrap_or_default().to_string_lossy();
-                let display = if app.show_git {
-                    if let Some(map) = &app.git_status {
-                        let git = map.get(p).map(|s| s.short()).unwrap_or(".");
-                        format!("{:2} {}", git, name)
+            let items: Vec<ListItem> = app
+                .entries
+                .iter()
+                .map(|p| {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy();
+                    let display = if app.show_git {
+                        if let Some(map) = &app.git_status {
+                            let git = map.get(p).map(|s| s.short()).unwrap_or(".");
+                            format!("{:2} {}", git, name)
+                        } else {
+                            name.to_string()
+                        }
                     } else {
                         name.to_string()
-                    }
-                } else {
-                    name.to_string()
-                };
+                    };
 
-                let mut style = if p.is_dir() { Style::default().fg(Color::Blue) } else { Style::default() };
-                if app.marked_delete.contains(p) {
-                    style = style.bg(Color::Red).fg(Color::Black).add_modifier(Modifier::BOLD);
-                } else if app.copy_buffer.contains(p) {
-                    style = style.fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD);
-                } else if app.move_buffer.contains(p) {
-                    style = style.bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD);
-                } else if app.symlink_mode {
-                    if let Some(sel) = app.selected_path() {
-                        if sel == *p {
-                            style = style.bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD);
+                    let mut style = if p.is_dir() {
+                        Style::default().fg(Color::Blue)
+                    } else {
+                        Style::default()
+                    };
+                    if app.marked_delete.contains(p) {
+                        style = style
+                            .bg(Color::Red)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD);
+                    } else if app.copy_buffer.contains(p) {
+                        style = style
+                            .fg(Color::Black)
+                            .bg(Color::Green)
+                            .add_modifier(Modifier::BOLD);
+                    } else if app.move_buffer.contains(p) {
+                        style = style
+                            .bg(Color::Magenta)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD);
+                    } else if app.symlink_mode {
+                        if let Some(sel) = app.selected_path() {
+                            if sel == *p {
+                                style = style
+                                    .bg(Color::Yellow)
+                                    .fg(Color::Black)
+                                    .add_modifier(Modifier::BOLD);
+                            }
                         }
                     }
-                } 
 
-                ListItem::new(display).style(style)
-            }).collect();
+                    ListItem::new(display).style(style)
+                })
+                .collect();
 
             // Directory name turns green if under git
             let dir_title = if app.git_status.is_some() {
-                Span::styled(app.current_dir.to_string_lossy(), Style::default().fg(Color::LightGreen))
+                Span::styled(
+                    app.current_dir.to_string_lossy(),
+                    Style::default().fg(Color::LightGreen),
+                )
             } else {
                 Span::raw(app.current_dir.to_string_lossy())
             };
 
-            let left_block = Block::default()
-                .borders(Borders::ALL)
-                .title(dir_title);
+            let left_block = Block::default().borders(Borders::ALL).title(dir_title);
 
             // Render file list
             let mut list_state = app.state.clone();
@@ -535,7 +578,7 @@ fn main() -> Result<()> {
                 format!("g {}", app.goto_query)
             } else if app.rename_mode {
                 format!("Rename: {}", app.rename_query)
-            } else  if app.symlink_mode {
+            } else if app.symlink_mode {
                 format!("Symlink: {}", app.symlink_query)
             } else {
                 "".to_string()
@@ -548,7 +591,6 @@ fn main() -> Result<()> {
         // Handle input
         if let Event::Key(KeyEvent { code, .. }) = event::read()? {
             match code {
-
                 // ESC cancels all modes
                 KeyCode::Esc => {
                     app.search_mode = false;
@@ -638,7 +680,11 @@ fn main() -> Result<()> {
                         }
                     } else {
                         let p = PathBuf::from(path_input);
-                        if p.is_absolute() { p } else { app.current_dir.join(p) }
+                        if p.is_absolute() {
+                            p
+                        } else {
+                            app.current_dir.join(p)
+                        }
                     };
 
                     if target_path.is_dir() {
@@ -654,7 +700,12 @@ fn main() -> Result<()> {
 
                 // Main keybindings (only active when not in a mode)
                 KeyCode::Char('s') => {
-                    if !app.symlink_mode && !app.rename_mode && !app.search_mode && !app.create_mode && !app.goto_mode {
+                    if !app.symlink_mode
+                        && !app.rename_mode
+                        && !app.search_mode
+                        && !app.create_mode
+                        && !app.goto_mode
+                    {
                         if app.selected_path().is_some() {
                             app.symlink_mode = true;
                             app.symlink_query.clear();
@@ -671,23 +722,67 @@ fn main() -> Result<()> {
                     }
                 }
 
-                KeyCode::Char('c') => { if !app.symlink_mode && !app.rename_mode { app.mark_copy(); } }
-                KeyCode::Char('m') => { if !app.symlink_mode && !app.rename_mode { app.mark_move(); } }
-                KeyCode::Char('p') => { if !app.symlink_mode && !app.rename_mode { let _ = app.paste(); } }
-                KeyCode::Char('d') => { if !app.symlink_mode && !app.rename_mode { if let Some(path) = app.selected_path() { app.toggle_delete(&path); } } }
-                KeyCode::Char('r') => { if !app.symlink_mode && !app.rename_mode { if let Some(path) = app.selected_path() { app.unmark_delete(&path); } } }
+                KeyCode::Char('c') => {
+                    if !app.symlink_mode && !app.rename_mode {
+                        app.mark_copy();
+                    }
+                }
+                KeyCode::Char('m') => {
+                    if !app.symlink_mode && !app.rename_mode {
+                        app.mark_move();
+                    }
+                }
+                KeyCode::Char('p') => {
+                    if !app.symlink_mode && !app.rename_mode {
+                        let _ = app.paste();
+                    }
+                }
+                KeyCode::Char('d') => {
+                    if !app.symlink_mode && !app.rename_mode {
+                        if let Some(path) = app.selected_path() {
+                            app.toggle_delete(&path);
+                        }
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if !app.symlink_mode && !app.rename_mode {
+                        if let Some(path) = app.selected_path() {
+                            app.unmark_delete(&path);
+                        }
+                    }
+                }
 
                 KeyCode::Char('q') => break,
-                KeyCode::Char('/') => { app.search_mode = true; app.search_query.clear(); }
-                KeyCode::Char('n') => { app.create_mode = true; app.create_query.clear(); }
-                KeyCode::Char('g') if !app.search_mode && !app.create_mode => { app.goto_mode = true; app.goto_query.clear(); }
-                KeyCode::Char('.') => { app.show_hidden = !app.show_hidden; let _ = app.refresh(); }
-                KeyCode::Char('?') => { app.show_git = !app.show_git; }
+                KeyCode::Char('/') => {
+                    app.search_mode = true;
+                    app.search_query.clear();
+                }
+                KeyCode::Char('n') => {
+                    app.create_mode = true;
+                    app.create_query.clear();
+                }
+                KeyCode::Char('g') if !app.search_mode && !app.create_mode => {
+                    app.goto_mode = true;
+                    app.goto_query.clear();
+                }
+                KeyCode::Char('.') => {
+                    app.show_hidden = !app.show_hidden;
+                    let _ = app.refresh();
+                }
+                KeyCode::Char('?') => {
+                    app.show_git = !app.show_git;
+                }
 
                 KeyCode::Down => app.next(),
                 KeyCode::Up => app.previous(),
-                KeyCode::Left => { let _ = app.go_parent(); }
-                KeyCode::Right => { if let Some(path) = app.selected_path() { let _ = app.enter_dir(path); } }
+                KeyCode::Left => {
+                    let _ = app.go_parent();
+                }
+                KeyCode::Right => {
+                    if let Some(path) = app.selected_path() {
+                        let _ = app.enter_dir(path);
+                    }
+                }
 
                 KeyCode::Enter => {
                     if !app.rename_mode && !app.symlink_mode {
@@ -705,12 +800,12 @@ fn main() -> Result<()> {
 
                 _ => {}
             }
-
         }
     }
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+    println!("{}", app.current_dir.display());
     Ok(())
 }
