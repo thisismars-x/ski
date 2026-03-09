@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::Result;
+use chrono::{Local, TimeZone};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
     execute,
@@ -22,11 +23,11 @@ use ratatui::{
 };
 use regex::Regex;
 
-mod git;
-use chrono::{Local, TimeZone};
-use git::{GitStatus, get_git_status};
 #[cfg(unix)]
 use users::{get_group_by_gid, get_user_by_uid};
+
+mod git;
+use git::{GitStatus, get_git_status};
 
 /// Main app structure with UI state
 struct App {
