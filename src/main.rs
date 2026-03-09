@@ -23,7 +23,10 @@ use ratatui::{
 use regex::Regex;
 
 mod git;
+use chrono::{Local, TimeZone};
 use git::{GitStatus, get_git_status};
+#[cfg(unix)]
+use users::{get_group_by_gid, get_user_by_uid};
 
 /// Main app structure with UI state
 struct App {
@@ -43,6 +46,7 @@ struct App {
 
     rename_mode: bool,
     rename_query: String,
+    rename_target: Option<PathBuf>,
 
     marked_delete: HashSet<PathBuf>,
     copy_buffer: Vec<PathBuf>,
@@ -51,6 +55,7 @@ struct App {
 
     symlink_mode: bool,
     symlink_query: String,
+    symlink_target: Option<PathBuf>,
 
     cursor_memory: HashMap<PathBuf, usize>,
 
@@ -81,8 +86,10 @@ impl App {
             preview_content: String::new(),
             rename_mode: false,
             rename_query: String::new(),
+            rename_target: None,
             symlink_mode: false,
             symlink_query: String::new(),
+            symlink_target: None,
             cursor_memory: HashMap::new(),
             show_git: true,
             git_status: None,
@@ -158,46 +165,74 @@ impl App {
             }
         };
 
+        // Last modified
         let modified = metadata
             .modified()
             .ok()
             .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
             .map(|d| {
-                let datetime = chrono::DateTime::from_timestamp(d.as_secs() as i64, 0).unwrap(); // remove deprecated function chrono::NativeDateTime
-                datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+                Local
+                    .timestamp_opt(d.as_secs() as i64, 0)
+                    .unwrap()
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
+        // Current time
+        let current_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        // Permissions
         let perms = App::get_permissions_string(&metadata);
+
+        // Owner / group (Unix only)
+        #[cfg(unix)]
+        let owner_group = {
+            use std::os::unix::fs::MetadataExt;
+            let uid = metadata.uid();
+            let gid = metadata.gid();
+            let user = get_user_by_uid(uid)
+                .map(|u| u.name().to_string_lossy().to_string())
+                .unwrap_or(uid.to_string());
+            let group = get_group_by_gid(gid)
+                .map(|g| g.name().to_string_lossy().to_string())
+                .unwrap_or(gid.to_string());
+            format!("Owner: {} | Group: {}", user, group)
+        };
+        #[cfg(windows)]
+        let owner_group = "Owner info not supported on Windows".to_string();
 
         let mut preview = String::new();
 
         if path.is_dir() {
             let count = fs::read_dir(&path).map(|r| r.count()).unwrap_or(0);
             preview.push_str(&format!(
-                "File Type: Directory\nSize: {} entries\nPermissions: {}\nLast Modified: {}\n{}\n",
+                "Type: Directory\nEntries: {}\n{}\nPermissions: {}\nLast Modified: {}\nCurrent Time: {}\n{}\n",
                 count,
+                owner_group,
                 perms,
                 modified,
+                current_time,
                 "-".repeat(50)
             ));
         } else {
             let size = metadata.len();
             let file_type = match fs::read_to_string(&path) {
-                Ok(_) => "File",
+                Ok(_) => "Text File",
                 Err(_) => "Binary/Unreadable",
             };
-
             preview.push_str(&format!(
-                "File Type: {}\nSize: {} bytes\nPermissions: {}\nLast Modified: {}\n{}\n",
+                "Type: {}\nSize: {} bytes\n{}\nPermissions: {}\nLast Modified: {}\nCurrent Time: {}\n{}\n",
                 file_type,
                 size,
+                owner_group,
                 perms,
                 modified,
+                current_time,
                 "-".repeat(50)
             ));
 
-            if file_type == "File" {
+            if file_type == "Text File" {
                 if let Ok(content) = fs::read_to_string(&path) {
                     let lines = content.lines().take(50).collect::<Vec<_>>().join("\n");
                     preview.push_str(&lines);
@@ -207,7 +242,6 @@ impl App {
 
         self.preview_content = preview;
     }
-
     #[cfg(unix)]
     fn get_permissions_string(metadata: &fs::Metadata) -> String {
         use std::os::unix::fs::PermissionsExt;
@@ -270,6 +304,8 @@ impl App {
                 self.cursor_memory.insert(self.current_dir.clone(), index);
             }
             self.current_dir = parent.to_path_buf();
+            self.search_mode = false; // get rid of the search bar when enter/leaving a directory
+            self.search_query.clear();
             self.refresh()?;
         }
         Ok(())
@@ -283,6 +319,8 @@ impl App {
             match fs::read_dir(&path) {
                 Ok(_) => {
                     self.current_dir = path;
+                    self.search_mode = false;
+                    self.search_query.clear();
                     self.refresh()?;
                 }
                 Err(e) => {
@@ -296,7 +334,8 @@ impl App {
     fn filter(&mut self) {
         if self.search_query.is_empty() {
             self.entries = self.all_entries.clone();
-        } else if let Ok(regex) = Regex::new(&self.search_query) {
+        } else if let Ok(regex) = Regex::new(&format!("(?i){}", self.search_query)) {
+            // case insensitive file search
             self.entries = self
                 .all_entries
                 .iter()
@@ -434,32 +473,6 @@ impl App {
             }
         }
     }
-
-    fn create_symlink_for_selected(&mut self) -> Result<()> {
-        if let Some(src) = self.selected_path() {
-            let name = self.symlink_query.trim();
-            if name.is_empty() {
-                self.symlink_mode = false;
-                return Ok(()); // do nothing if no name
-            }
-
-            let dest = self.current_dir.join(name);
-
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(src, &dest)?;
-            #[cfg(windows)]
-            if src.is_file() {
-                std::os::windows::fs::symlink_file(src, &dest)?;
-            } else {
-                std::os::windows::fs::symlink_dir(src, &dest)?;
-            }
-
-            self.symlink_query.clear();
-            self.symlink_mode = false;
-            self.refresh()?; // update list
-        }
-        Ok(())
-    }
 }
 
 /// Suspend terminal for external program
@@ -549,17 +562,23 @@ fn main() -> Result<()> {
                             .bg(Color::Magenta)
                             .fg(Color::Black)
                             .add_modifier(Modifier::BOLD);
-                    } else if app.symlink_mode {
-                        if let Some(sel) = app.selected_path() {
-                            if sel == *p {
-                                style = style
-                                    .bg(Color::Yellow)
-                                    .fg(Color::Black)
-                                    .add_modifier(Modifier::BOLD);
-                            }
+                    }
+                    if let Some(target) = &app.rename_target {
+                        if target == p {
+                            style = style
+                                .bg(Color::Yellow)
+                                .fg(Color::Black)
+                                .add_modifier(Modifier::BOLD);
                         }
                     }
-
+                    if let Some(target) = &app.symlink_target {
+                        if target == p {
+                            style = style
+                                .bg(Color::Yellow)
+                                .fg(Color::Black)
+                                .add_modifier(Modifier::BOLD);
+                        }
+                    }
                     ListItem::new(display).style(style)
                 })
                 .collect();
@@ -618,6 +637,8 @@ fn main() -> Result<()> {
                     app.goto_mode = false;
                     app.rename_mode = false;
                     app.symlink_mode = false;
+                    app.rename_target = None;
+                    app.symlink_target = None;
                     app.marked_delete.clear();
                     app.copy_buffer.clear();
                     app.move_buffer.clear();
@@ -638,8 +659,23 @@ fn main() -> Result<()> {
                     app.symlink_query.pop();
                 }
                 KeyCode::Enter if app.symlink_mode => {
-                    let _ = app.create_symlink_for_selected();
+                    if let Some(src) = app.symlink_target.take() {
+                        let name = app.symlink_query.trim();
+                        if !name.is_empty() {
+                            let dest = app.current_dir.join(name);
+                            #[cfg(unix)]
+                            std::os::unix::fs::symlink(&src, &dest)?;
+                            #[cfg(windows)]
+                            if src.is_file() {
+                                std::os::windows::fs::symlink_file(&src, &dest)?;
+                            } else {
+                                std::os::windows::fs::symlink_dir(&src, &dest)?;
+                            }
+                            let _ = app.refresh();
+                        }
+                    }
                     app.symlink_mode = false;
+                    app.symlink_query.clear();
                 }
 
                 // Typing while in rename mode
@@ -650,7 +686,7 @@ fn main() -> Result<()> {
                     app.rename_query.pop();
                 }
                 KeyCode::Enter if app.rename_mode => {
-                    if let Some(old_path) = app.selected_path() {
+                    if let Some(old_path) = app.rename_target.take() {
                         let new_name = app.rename_query.trim();
                         if !new_name.is_empty() {
                             let new_path = old_path.parent().unwrap().join(new_name);
@@ -720,24 +756,23 @@ fn main() -> Result<()> {
 
                 // Main keybindings (only active when not in a mode)
                 KeyCode::Char('s') => {
-                    if !app.symlink_mode
-                        && !app.rename_mode
-                        && !app.search_mode
-                        && !app.create_mode
-                        && !app.goto_mode
-                    {
-                        if app.selected_path().is_some() {
+                    if !app.symlink_mode && !app.rename_mode {
+                        if let Some(path) = app.selected_path() {
                             app.symlink_mode = true;
                             app.symlink_query.clear();
+                            app.symlink_target = Some(path); // remember target like rename
                         }
                     }
                 }
 
                 KeyCode::Char(' ') => {
                     if !app.symlink_mode && !app.rename_mode {
-                        if app.selected_path().is_some() {
-                            app.rename_mode = true;
-                            app.rename_query.clear();
+                        if !app.symlink_mode && !app.rename_mode {
+                            if let Some(path) = app.selected_path() {
+                                app.rename_mode = true;
+                                app.rename_query.clear();
+                                app.rename_target = Some(path); // store the file to rename
+                            }
                         }
                     }
                 }
