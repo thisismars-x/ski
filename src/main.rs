@@ -52,6 +52,8 @@ struct App {
     symlink_mode: bool,
     symlink_query: String,
 
+    cursor_memory: HashMap<PathBuf, usize>,
+
     show_git: bool,
     git_status: Option<HashMap<PathBuf, GitStatus>>, // may not be under git tracking
 }
@@ -81,6 +83,7 @@ impl App {
             rename_query: String::new(),
             symlink_mode: false,
             symlink_query: String::new(),
+            cursor_memory: HashMap::new(),
             show_git: true,
             git_status: None,
         };
@@ -113,8 +116,14 @@ impl App {
         if self.entries.is_empty() {
             self.state.select(None);
         } else {
-            let selected = self.state.selected().unwrap_or(0);
-            let clamped = selected.min(self.entries.len() - 1);
+            let remembered = self
+                .cursor_memory
+                .get(&self.current_dir)
+                .copied()
+                .unwrap_or(0);
+
+            let clamped = remembered.min(self.entries.len().saturating_sub(1));
+            self.state.select(Some(clamped));
             self.state.select(Some(clamped));
         }
 
@@ -257,6 +266,9 @@ impl App {
 
     fn go_parent(&mut self) -> Result<()> {
         if let Some(parent) = self.current_dir.parent() {
+            if let Some(index) = self.state.selected() {
+                self.cursor_memory.insert(self.current_dir.clone(), index);
+            }
             self.current_dir = parent.to_path_buf();
             self.refresh()?;
         }
@@ -265,6 +277,9 @@ impl App {
 
     fn enter_dir(&mut self, path: PathBuf) -> Result<()> {
         if path.is_dir() {
+            if let Some(index) = self.state.selected() {
+                self.cursor_memory.insert(self.current_dir.clone(), index);
+            }
             match fs::read_dir(&path) {
                 Ok(_) => {
                     self.current_dir = path;
@@ -500,7 +515,12 @@ fn main() -> Result<()> {
                     let name = p.file_name().unwrap_or_default().to_string_lossy();
                     let display = if app.show_git {
                         if let Some(map) = &app.git_status {
-                            let git = map.get(p).map(|s| s.short()).unwrap_or(".");
+                            // normalize path before looking them up
+                            let git = if let Ok(canon) = p.canonicalize() {
+                                map.get(&canon).map(|s| s.short()).unwrap_or(".")
+                            } else {
+                                "."
+                            };
                             format!("{:2} {}", git, name)
                         } else {
                             name.to_string()
