@@ -845,7 +845,13 @@ fn main() -> Result<()> {
                         if let Some(path) = app.selected_path() {
                             if path.is_file() {
                                 suspend_terminal(&mut terminal)?;
-                                let _ = open_in_editor(&path);
+                                if let Some(index) = app.state.selected() {
+                                    // remember file in cursor_memory
+                                    app.cursor_memory.insert(app.current_dir.clone(), index);
+                                }
+
+                                let _ = open_in_editor(&path); // refresh after exiting editor, better git annotations
+                                app.refresh()?;
                                 terminal = resume_terminal()?;
                             } else {
                                 let _ = app.enter_dir(path);
