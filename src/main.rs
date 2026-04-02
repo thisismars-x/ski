@@ -301,6 +301,7 @@ impl App {
 
     fn go_parent(&mut self) -> Result<()> {
         if let Some(parent) = self.current_dir.parent() {
+            env::set_current_dir(&parent)?;
             if let Some(index) = self.state.selected() {
                 self.cursor_memory.insert(self.current_dir.clone(), index);
             }
@@ -313,6 +314,7 @@ impl App {
     }
 
     fn enter_dir(&mut self, path: PathBuf) -> Result<()> {
+        env::set_current_dir(&path)?;
         if path.is_dir() {
             if let Some(index) = self.state.selected() {
                 self.cursor_memory.insert(self.current_dir.clone(), index);
